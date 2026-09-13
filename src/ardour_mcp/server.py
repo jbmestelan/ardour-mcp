@@ -6,9 +6,12 @@ for controlling Ardour via OSC.
 """
 
 import asyncio
+import inspect
+import json
 import logging
-from typing import Any, Optional
+from typing import Any, List, Optional, Union, get_args, get_origin, get_type_hints
 
+from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
@@ -56,7 +59,8 @@ class ArdourMCPServer:
         self.track_tools = TrackTools(self.osc_bridge, self.state)
         self.session_tools = SessionTools(self.osc_bridge, self.state)
         self.mixer_tools = MixerTools(self.osc_bridge, self.state)
-        self.advanced_mixer_tools = AdvancedMixerTools(self.osc_bridge, self.state)
+        self.advanced_mixer_tools = AdvancedMixerTools(
+            self.osc_bridge, self.state)
         self.automation_tools = AutomationTools(self.osc_bridge, self.state)
         self.metering_tools = MeteringTools(self.osc_bridge, self.state)
         self.navigation_tools = NavigationTools(self.osc_bridge, self.state)
@@ -84,6 +88,10 @@ class ArdourMCPServer:
         # Register state feedback handlers
         self.state.register_feedback_handlers(self.osc_bridge)
         logger.info("State feedback handlers registered")
+
+        # Request a full state dump now that the handlers are registered
+        self.osc_bridge.send_command("/refresh")
+        logger.info("Requested initial state refresh from Ardour")
 
         # Register MCP tools
         self._register_tools()
@@ -116,44 +124,88 @@ class ArdourMCPServer:
         - Track management
         - Session information
         """
+        # Tool registry: tool name -> {"function", "description", "inputSchema"}
+        tool_registry: dict[str, dict[str, Any]] = {}
+
+        def _json_type(annotation: Any) -> dict[str, Any]:
+            """Map a Python type annotation to a JSON Schema fragment."""
+            origin = get_origin(annotation)
+            if origin is Union:
+                args = [a for a in get_args(annotation) if a is not type(None)]
+                if len(args) == 1:
+                    return _json_type(args[0])
+                return {"anyOf": [_json_type(a) for a in args]}
+            if origin in (list, List):
+                args = get_args(annotation)
+                return {"type": "array", "items": _json_type(args[0]) if args else {}}
+            if origin is dict:
+                return {"type": "object"}
+            return {
+                str: {"type": "string"},
+                int: {"type": "integer"},
+                float: {"type": "number"},
+                bool: {"type": "boolean"},
+            }.get(annotation, {"type": "string"})
+
+        def tool(func: Any) -> Any:
+            """Register a function as an MCP tool and return it unchanged."""
+            hints = get_type_hints(func)
+            properties: dict[str, Any] = {}
+            required: list[str] = []
+            for pname, param in inspect.signature(func).parameters.items():
+                properties[pname] = _json_type(hints.get(pname, str))
+                if param.default is inspect.Parameter.empty:
+                    required.append(pname)
+            schema: dict[str, Any] = {
+                "type": "object", "properties": properties}
+            if required:
+                schema["required"] = required
+            description = (inspect.getdoc(func) or "").split("\n\n")[0].strip()
+            tool_registry[func.__name__] = {
+                "function": func,
+                "description": description,
+                "inputSchema": schema,
+            }
+            return func
+
         # Transport Control Tools
-        @self.server.call_tool()
+        @tool
         async def transport_play() -> list[Any]:
             """Start playback in Ardour."""
             result = await self.transport_tools.transport_play()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def transport_stop() -> list[Any]:
             """Stop playback in Ardour."""
             result = await self.transport_tools.transport_stop()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def transport_pause() -> list[Any]:
             """Toggle pause in Ardour."""
             result = await self.transport_tools.transport_pause()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def toggle_record() -> list[Any]:
             """Toggle recording mode in Ardour."""
             result = await self.transport_tools.toggle_record()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def goto_start() -> list[Any]:
             """Jump to session start."""
             result = await self.transport_tools.goto_start()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def goto_end() -> list[Any]:
             """Jump to session end."""
             result = await self.transport_tools.goto_end()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def goto_marker(marker_name: str) -> list[Any]:
             """
             Jump to a named marker.
@@ -164,7 +216,7 @@ class ArdourMCPServer:
             result = await self.transport_tools.goto_marker(marker_name)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def locate(frame: int) -> list[Any]:
             """
             Jump to a specific frame position.
@@ -175,7 +227,7 @@ class ArdourMCPServer:
             result = await self.transport_tools.locate(frame)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def set_loop_range(start_frame: int, end_frame: int) -> list[Any]:
             """
             Set loop range.
@@ -187,20 +239,20 @@ class ArdourMCPServer:
             result = await self.transport_tools.set_loop_range(start_frame, end_frame)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def toggle_loop() -> list[Any]:
             """Toggle loop mode."""
             result = await self.transport_tools.toggle_loop()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_transport_position() -> list[Any]:
             """Get current transport position and state."""
             result = await self.transport_tools.get_transport_position()
             return [result]
 
         # Track Management Tools
-        @self.server.call_tool()
+        @tool
         async def create_audio_track(name: str = "") -> list[Any]:
             """
             Create a new audio track.
@@ -211,7 +263,7 @@ class ArdourMCPServer:
             result = await self.track_tools.create_audio_track(name)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def create_midi_track(name: str = "") -> list[Any]:
             """
             Create a new MIDI track.
@@ -222,13 +274,13 @@ class ArdourMCPServer:
             result = await self.track_tools.create_midi_track(name)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def list_tracks() -> list[Any]:
             """List all tracks in the session."""
             result = await self.track_tools.list_tracks()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def select_track(track_id: int) -> list[Any]:
             """
             Select a track by ID.
@@ -239,7 +291,7 @@ class ArdourMCPServer:
             result = await self.track_tools.select_track(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def rename_track(track_id: int, new_name: str) -> list[Any]:
             """
             Rename a track.
@@ -252,56 +304,56 @@ class ArdourMCPServer:
             return [result]
 
         # Session Information Tools
-        @self.server.call_tool()
+        @tool
         async def get_session_info() -> list[Any]:
             """Get complete session information."""
             result = await self.session_tools.get_session_info()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_tempo() -> list[Any]:
             """Get current session tempo."""
             result = await self.session_tools.get_tempo()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_time_signature() -> list[Any]:
             """Get current time signature."""
             result = await self.session_tools.get_time_signature()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_sample_rate() -> list[Any]:
             """Get session sample rate."""
             result = await self.session_tools.get_sample_rate()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def list_markers() -> list[Any]:
             """List all markers in the session."""
             result = await self.session_tools.list_markers()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def save_session() -> list[Any]:
             """Save the current session."""
             result = await self.session_tools.save_session()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_track_count() -> list[Any]:
             """Get number of tracks in session."""
             result = await self.session_tools.get_track_count()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def is_session_dirty() -> list[Any]:
             """Check if session has unsaved changes."""
             result = await self.session_tools.is_session_dirty()
             return [result]
 
         # Mixer Control Tools
-        @self.server.call_tool()
+        @tool
         async def set_track_volume(track_id: int, volume_db: float) -> list[Any]:
             """
             Set track volume/gain in dB.
@@ -313,7 +365,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.set_track_volume(track_id, volume_db)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def set_track_pan(track_id: int, pan: float) -> list[Any]:
             """
             Set track pan position.
@@ -325,7 +377,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.set_track_pan(track_id, pan)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def set_track_mute(track_id: int, muted: bool) -> list[Any]:
             """
             Set track mute state.
@@ -337,7 +389,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.set_track_mute(track_id, muted)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def toggle_track_mute(track_id: int) -> list[Any]:
             """
             Toggle track mute state.
@@ -348,7 +400,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.toggle_track_mute(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def set_track_solo(track_id: int, soloed: bool) -> list[Any]:
             """
             Set track solo state.
@@ -360,7 +412,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.set_track_solo(track_id, soloed)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def toggle_track_solo(track_id: int) -> list[Any]:
             """
             Toggle track solo state.
@@ -371,7 +423,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.toggle_track_solo(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def set_track_rec_enable(track_id: int, enabled: bool) -> list[Any]:
             """
             Set track record enable state.
@@ -383,7 +435,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.set_track_rec_enable(track_id, enabled)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def toggle_track_rec_enable(track_id: int) -> list[Any]:
             """
             Toggle track record enable state.
@@ -394,7 +446,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.toggle_track_rec_enable(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def arm_track_for_recording(track_id: int) -> list[Any]:
             """
             Arm a track for recording (convenience method).
@@ -405,7 +457,7 @@ class ArdourMCPServer:
             result = await self.mixer_tools.arm_track_for_recording(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def disarm_track(track_id: int) -> list[Any]:
             """
             Disarm a track from recording (convenience method).
@@ -416,25 +468,25 @@ class ArdourMCPServer:
             result = await self.mixer_tools.disarm_track(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def mute_all_tracks() -> list[Any]:
             """Mute all tracks in the session."""
             result = await self.mixer_tools.mute_all_tracks()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def unmute_all_tracks() -> list[Any]:
             """Unmute all tracks in the session."""
             result = await self.mixer_tools.unmute_all_tracks()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def clear_all_solos() -> list[Any]:
             """Clear solo state from all tracks."""
             result = await self.mixer_tools.clear_all_solos()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_track_mixer_state(track_id: int) -> list[Any]:
             """
             Get current mixer state for a track.
@@ -446,7 +498,7 @@ class ArdourMCPServer:
             return [result]
 
         # Navigation Control Tools - Marker Management
-        @self.server.call_tool()
+        @tool
         async def create_marker(name: str, position: Optional[int] = None) -> list[Any]:
             """
             Create a marker at specified position or current position.
@@ -458,7 +510,7 @@ class ArdourMCPServer:
             result = await self.navigation_tools.create_marker(name, position)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def delete_marker(name: str) -> list[Any]:
             """
             Delete a marker by name.
@@ -469,7 +521,7 @@ class ArdourMCPServer:
             result = await self.navigation_tools.delete_marker(name)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def rename_marker(old_name: str, new_name: str) -> list[Any]:
             """
             Rename a marker.
@@ -481,7 +533,7 @@ class ArdourMCPServer:
             result = await self.navigation_tools.rename_marker(old_name, new_name)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def goto_marker_by_name(name: str) -> list[Any]:
             """
             Jump to a named marker.
@@ -492,7 +544,7 @@ class ArdourMCPServer:
             result = await self.navigation_tools.goto_marker(name)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_marker_position(name: str) -> list[Any]:
             """
             Get the position of a named marker.
@@ -504,7 +556,7 @@ class ArdourMCPServer:
             return [result]
 
         # Navigation Control Tools - Loop Control
-        @self.server.call_tool()
+        @tool
         async def set_loop_range_frames(start_frame: int, end_frame: int) -> list[Any]:
             """
             Set loop range in frames.
@@ -516,26 +568,26 @@ class ArdourMCPServer:
             result = await self.navigation_tools.set_loop_range(start_frame, end_frame)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def enable_loop() -> list[Any]:
             """Enable loop playback."""
             result = await self.navigation_tools.enable_loop()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def disable_loop() -> list[Any]:
             """Disable loop playback."""
             result = await self.navigation_tools.disable_loop()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def clear_loop_range() -> list[Any]:
             """Clear loop range and disable looping."""
             result = await self.navigation_tools.clear_loop_range()
             return [result]
 
         # Navigation Control Tools - Tempo & Time Signature
-        @self.server.call_tool()
+        @tool
         async def set_session_tempo(bpm: float) -> list[Any]:
             """
             Set session tempo in beats per minute.
@@ -546,13 +598,13 @@ class ArdourMCPServer:
             result = await self.navigation_tools.set_tempo(bpm)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_session_tempo() -> list[Any]:
             """Get current session tempo."""
             result = await self.navigation_tools.get_tempo()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def set_session_time_signature(numerator: int, denominator: int) -> list[Any]:
             """
             Set time signature.
@@ -564,14 +616,14 @@ class ArdourMCPServer:
             result = await self.navigation_tools.set_time_signature(numerator, denominator)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_session_time_signature() -> list[Any]:
             """Get current time signature."""
             result = await self.navigation_tools.get_time_signature()
             return [result]
 
         # Navigation Control Tools - Navigation Helpers
-        @self.server.call_tool()
+        @tool
         async def goto_timecode(hours: int, minutes: int, seconds: int, frames: int = 0) -> list[Any]:
             """
             Jump to a specific timecode position.
@@ -585,7 +637,7 @@ class ArdourMCPServer:
             result = await self.navigation_tools.goto_time(hours, minutes, seconds, frames)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def goto_bar_number(bar_number: int) -> list[Any]:
             """
             Jump to a specific bar number.
@@ -596,7 +648,7 @@ class ArdourMCPServer:
             result = await self.navigation_tools.goto_bar(bar_number)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def skip_forward_seconds(seconds: float) -> list[Any]:
             """
             Skip forward by specified number of seconds.
@@ -607,7 +659,7 @@ class ArdourMCPServer:
             result = await self.navigation_tools.skip_forward(seconds)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def skip_backward_seconds(seconds: float) -> list[Any]:
             """
             Skip backward by specified number of seconds.
@@ -619,32 +671,32 @@ class ArdourMCPServer:
             return [result]
 
         # Recording Control Tools - Global Recording
-        @self.server.call_tool()
+        @tool
         async def start_recording() -> list[Any]:
             """Start recording with transport playback."""
             result = await self.recording_tools.start_recording()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def stop_recording() -> list[Any]:
             """Stop recording and transport."""
             result = await self.recording_tools.stop_recording()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def toggle_recording() -> list[Any]:
             """Toggle global record enable state."""
             result = await self.recording_tools.toggle_recording()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def is_recording() -> list[Any]:
             """Query current recording state."""
             result = await self.recording_tools.is_recording()
             return [result]
 
         # Recording Control Tools - Punch Recording
-        @self.server.call_tool()
+        @tool
         async def set_punch_range(start_frame: int, end_frame: int) -> list[Any]:
             """
             Set punch-in/out recording range.
@@ -656,26 +708,26 @@ class ArdourMCPServer:
             result = await self.recording_tools.set_punch_range(start_frame, end_frame)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def enable_punch_in() -> list[Any]:
             """Enable punch-in recording mode."""
             result = await self.recording_tools.enable_punch_in()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def enable_punch_out() -> list[Any]:
             """Enable punch-out recording mode."""
             result = await self.recording_tools.enable_punch_out()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def clear_punch_range() -> list[Any]:
             """Disable punch-in and punch-out modes."""
             result = await self.recording_tools.clear_punch_range()
             return [result]
 
         # Recording Control Tools - Input Monitoring
-        @self.server.call_tool()
+        @tool
         async def set_input_monitoring(track_id: int, enabled: bool) -> list[Any]:
             """
             Enable/disable input monitoring for a track.
@@ -687,7 +739,7 @@ class ArdourMCPServer:
             result = await self.recording_tools.set_input_monitoring(track_id, enabled)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def set_disk_monitoring(track_id: int, enabled: bool) -> list[Any]:
             """
             Enable/disable disk monitoring for a track.
@@ -699,7 +751,7 @@ class ArdourMCPServer:
             result = await self.recording_tools.set_disk_monitoring(track_id, enabled)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def set_monitoring_mode(track_id: int, mode: str) -> list[Any]:
             """
             Set monitoring mode for a track.
@@ -712,20 +764,20 @@ class ArdourMCPServer:
             return [result]
 
         # Recording Control Tools - Query Methods
-        @self.server.call_tool()
+        @tool
         async def get_armed_tracks() -> list[Any]:
             """List all tracks armed for recording."""
             result = await self.recording_tools.get_armed_tracks()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_recording_state() -> list[Any]:
             """Get complete recording state."""
             result = await self.recording_tools.get_recording_state()
             return [result]
 
         # Advanced Mixer Control Tools - Send Configuration
-        @self.server.call_tool()
+        @tool
         async def set_send_level(track_id: int, send_id: int, level_db: float) -> list[Any]:
             """
             Set send level in dB.
@@ -738,7 +790,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.set_send_level(track_id, send_id, level_db)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def enable_send(track_id: int, send_id: int, enabled: bool) -> list[Any]:
             """
             Enable or disable a send.
@@ -751,7 +803,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.enable_send(track_id, send_id, enabled)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def toggle_send(track_id: int, send_id: int) -> list[Any]:
             """
             Toggle send enabled state.
@@ -763,7 +815,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.toggle_send(track_id, send_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def list_sends(track_id: int) -> list[Any]:
             """
             List all sends for a track.
@@ -775,7 +827,7 @@ class ArdourMCPServer:
             return [result]
 
         # Advanced Mixer Control Tools - Plugin Control
-        @self.server.call_tool()
+        @tool
         async def set_plugin_parameter(track_id: int, plugin_id: int, param_id: int, value: float) -> list[Any]:
             """
             Set plugin parameter value.
@@ -789,7 +841,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.set_plugin_parameter(track_id, plugin_id, param_id, value)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def activate_plugin(track_id: int, plugin_id: int) -> list[Any]:
             """
             Activate (enable) a plugin.
@@ -801,7 +853,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.activate_plugin(track_id, plugin_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def deactivate_plugin(track_id: int, plugin_id: int) -> list[Any]:
             """
             Deactivate (bypass) a plugin.
@@ -813,7 +865,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.deactivate_plugin(track_id, plugin_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def toggle_plugin(track_id: int, plugin_id: int) -> list[Any]:
             """
             Toggle plugin active state.
@@ -825,7 +877,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.toggle_plugin(track_id, plugin_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_plugin_info(track_id: int, plugin_id: int) -> list[Any]:
             """
             Get plugin information.
@@ -838,13 +890,13 @@ class ArdourMCPServer:
             return [result]
 
         # Advanced Mixer Control Tools - Bus Operations
-        @self.server.call_tool()
+        @tool
         async def list_buses() -> list[Any]:
             """List all buses in the session."""
             result = await self.advanced_mixer_tools.list_buses()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_bus_info(bus_id: int) -> list[Any]:
             """
             Get information about a specific bus.
@@ -855,7 +907,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.get_bus_info(bus_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def list_bus_sends(bus_id: int) -> list[Any]:
             """
             List sends going to a specific bus.
@@ -867,7 +919,7 @@ class ArdourMCPServer:
             return [result]
 
         # Advanced Mixer Control Tools - Query Methods
-        @self.server.call_tool()
+        @tool
         async def get_send_level(track_id: int, send_id: int) -> list[Any]:
             """
             Query send level from cache.
@@ -879,7 +931,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.get_send_level(track_id, send_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_plugin_parameters(track_id: int, plugin_id: int) -> list[Any]:
             """
             List plugin parameters.
@@ -891,7 +943,7 @@ class ArdourMCPServer:
             result = await self.advanced_mixer_tools.get_plugin_parameters(track_id, plugin_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_track_sends_count(track_id: int) -> list[Any]:
             """
             Get count of sends for a track.
@@ -903,7 +955,7 @@ class ArdourMCPServer:
             return [result]
 
         # Automation Control Tools - Automation Modes
-        @self.server.call_tool()
+        @tool
         async def set_automation_mode(track_id: int, parameter: str, mode: str) -> list[Any]:
             """
             Set automation mode for a parameter.
@@ -916,7 +968,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.set_automation_mode(track_id, parameter, mode)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_automation_mode(track_id: int, parameter: str) -> list[Any]:
             """
             Get automation mode for a parameter.
@@ -928,7 +980,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.get_automation_mode(track_id, parameter)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def list_automation_parameters(track_id: int) -> list[Any]:
             """
             List available automation parameters for a track.
@@ -940,7 +992,7 @@ class ArdourMCPServer:
             return [result]
 
         # Automation Control Tools - Automation Recording
-        @self.server.call_tool()
+        @tool
         async def enable_automation_write(track_id: int) -> list[Any]:
             """
             Enable automation write mode for all parameters on a track.
@@ -951,7 +1003,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.enable_automation_write(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def disable_automation_write(track_id: int) -> list[Any]:
             """
             Disable automation write mode for all parameters on a track.
@@ -962,7 +1014,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.disable_automation_write(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def record_automation(track_id: int, parameter: str) -> list[Any]:
             """
             Start recording automation for a specific parameter.
@@ -974,7 +1026,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.record_automation(track_id, parameter)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def stop_automation_recording(track_id: int, parameter: str) -> list[Any]:
             """
             Stop recording automation for a specific parameter.
@@ -987,7 +1039,7 @@ class ArdourMCPServer:
             return [result]
 
         # Automation Control Tools - Automation Editing
-        @self.server.call_tool()
+        @tool
         async def clear_automation(track_id: int, parameter: str, start_frame: Optional[int] = None, end_frame: Optional[int] = None) -> list[Any]:
             """
             Clear automation data for a parameter.
@@ -1001,7 +1053,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.clear_automation(track_id, parameter, start_frame, end_frame)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def has_automation(track_id: int, parameter: str) -> list[Any]:
             """
             Check if automation exists for a parameter.
@@ -1013,7 +1065,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.has_automation(track_id, parameter)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def copy_automation(source_track: int, dest_track: int, parameter: str) -> list[Any]:
             """
             Copy automation data between tracks.
@@ -1027,7 +1079,7 @@ class ArdourMCPServer:
             return [result]
 
         # Automation Control Tools - Automation Playback
-        @self.server.call_tool()
+        @tool
         async def enable_automation_playback(track_id: int, parameter: str) -> list[Any]:
             """
             Enable automation playback for a parameter.
@@ -1039,7 +1091,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.enable_automation_playback(track_id, parameter)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def disable_automation_playback(track_id: int, parameter: str) -> list[Any]:
             """
             Disable automation playback for a parameter.
@@ -1051,7 +1103,7 @@ class ArdourMCPServer:
             result = await self.automation_tools.disable_automation_playback(track_id, parameter)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_automation_state(track_id: int, parameter: str) -> list[Any]:
             """
             Get complete automation state for a parameter.
@@ -1064,7 +1116,7 @@ class ArdourMCPServer:
             return [result]
 
         # Metering & Monitoring Tools - Level Monitoring
-        @self.server.call_tool()
+        @tool
         async def get_track_level(track_id: int) -> list[Any]:
             """
             Get peak and RMS levels for a track.
@@ -1075,13 +1127,13 @@ class ArdourMCPServer:
             result = await self.metering_tools.get_track_level(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_master_level() -> list[Any]:
             """Get peak and RMS levels for master bus."""
             result = await self.metering_tools.get_master_level()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_bus_level(bus_id: int) -> list[Any]:
             """
             Get peak and RMS levels for a bus.
@@ -1092,7 +1144,7 @@ class ArdourMCPServer:
             result = await self.metering_tools.get_bus_level(bus_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def monitor_levels(track_ids: list[int], duration: float = 5.0) -> list[Any]:
             """
             Monitor levels over time for multiple tracks.
@@ -1105,7 +1157,7 @@ class ArdourMCPServer:
             return [result]
 
         # Metering & Monitoring Tools - Phase & Correlation
-        @self.server.call_tool()
+        @tool
         async def get_phase_correlation(track_id: int) -> list[Any]:
             """
             Get stereo phase correlation for a track.
@@ -1116,20 +1168,20 @@ class ArdourMCPServer:
             result = await self.metering_tools.get_phase_correlation(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_master_phase_correlation() -> list[Any]:
             """Get stereo phase correlation for master bus."""
             result = await self.metering_tools.get_master_phase_correlation()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def detect_phase_issues() -> list[Any]:
             """Detect tracks with phase problems."""
             result = await self.metering_tools.detect_phase_issues()
             return [result]
 
         # Metering & Monitoring Tools - Loudness Metering
-        @self.server.call_tool()
+        @tool
         async def analyze_loudness(track_id: Optional[int] = None) -> list[Any]:
             """
             Analyze loudness (LUFS/LU) using EBU R128 standard.
@@ -1140,20 +1192,20 @@ class ArdourMCPServer:
             result = await self.metering_tools.analyze_loudness(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_integrated_loudness() -> list[Any]:
             """Get integrated loudness (LUFS) for master bus."""
             result = await self.metering_tools.get_integrated_loudness()
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def get_loudness_range() -> list[Any]:
             """Get loudness range (LU) for master bus."""
             result = await self.metering_tools.get_loudness_range()
             return [result]
 
         # Metering & Monitoring Tools - Analysis & Export
-        @self.server.call_tool()
+        @tool
         async def detect_clipping(track_id: int) -> list[Any]:
             """
             Detect clipping events from level data.
@@ -1164,7 +1216,7 @@ class ArdourMCPServer:
             result = await self.metering_tools.detect_clipping(track_id)
             return [result]
 
-        @self.server.call_tool()
+        @tool
         async def export_level_data(track_ids: list[int], duration: float = 10.0) -> list[Any]:
             """
             Export meter data for AI analysis.
@@ -1176,7 +1228,39 @@ class ArdourMCPServer:
             result = await self.metering_tools.export_level_data(track_ids, duration)
             return [result]
 
-        logger.info("Registered 111 MCP tools (11 transport, 5 track, 9 session, 14 mixer, 15 advanced mixer, 13 automation, 12 metering, 17 navigation, 13 recording)")
+        @self.server.list_tools()
+        async def list_tools() -> list[types.Tool]:
+            """Advertise all registered Ardour tools to the MCP client."""
+            return [
+                types.Tool(
+                    name=name,
+                    description=spec["description"],
+                    inputSchema=spec["inputSchema"],
+                )
+                for name, spec in tool_registry.items()
+            ]
+
+        @self.server.call_tool()
+        async def call_tool(
+            name: str, arguments: dict[str, Any]
+        ) -> list[types.TextContent]:
+            """Dispatch an MCP tool call to its registered handler."""
+            spec = tool_registry.get(name)
+            if spec is None:
+                raise ValueError(f"Unknown tool: {name}")
+
+            result = await spec["function"](**(arguments or {}))
+            contents: list[types.TextContent] = []
+            for item in result:
+                text = (
+                    item
+                    if isinstance(item, str)
+                    else json.dumps(item, default=str, indent=2)
+                )
+                contents.append(types.TextContent(type="text", text=text))
+            return contents
+
+        logger.info(f"Registered {len(tool_registry)} MCP tools")
 
 
 async def serve() -> None:
