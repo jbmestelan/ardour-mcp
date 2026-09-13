@@ -29,12 +29,12 @@ class TestOSCBridgeStateSync:
         state.register_feedback_handlers(mock_bridge)
 
         # Verify handlers were registered
-        assert "/transport_frame" in callbacks
+        assert "/position/samples" in callbacks
         assert "/transport_speed" in callbacks
         assert "/tempo" in callbacks
 
         # Simulate OSC feedback
-        callbacks["/transport_frame"]("/transport_frame", [48000])
+        callbacks["/position/samples"]("/position/samples", [48000])
         assert state.get_transport().frame == 48000
 
         callbacks["/transport_speed"]("/transport_speed", [1.0])
@@ -57,9 +57,9 @@ class TestOSCBridgeStateSync:
         state.register_feedback_handlers(mock_bridge)
 
         # Simulate track creation and updates
-        callbacks["/strip/name"]("/strip/name", [1, "NewTrack"])
-        callbacks["/strip/gain"]("/strip/gain", [1, -6.0])
-        callbacks["/strip/pan_stereo_position"]("/strip/pan_stereo_position", [1, -0.3])
+        callbacks["/strip/name/*"]("/strip/name/1", ["NewTrack"])
+        callbacks["/strip/gain/*"]("/strip/gain/1", [-6.0])
+        callbacks["/strip/pan_stereo_position/*"]("/strip/pan_stereo_position/1", [-0.3])
 
         track = state.get_track(1)
         assert track.name == "NewTrack"
@@ -81,8 +81,8 @@ class TestOSCBridgeStateSync:
 
         # Create multiple tracks with feedback
         for i in range(1, 5):
-            callbacks["/strip/name"]("/strip/name", [i, f"Track{i}"])
-            callbacks["/strip/gain"]("/strip/gain", [i, -i])
+            callbacks["/strip/name/*"](f"/strip/name/{i}", [f"Track{i}"])
+            callbacks["/strip/gain/*"](f"/strip/gain/{i}", [-i])
 
         tracks = state.get_all_tracks()
         assert len(tracks) == 4
@@ -111,7 +111,7 @@ class TestStateExceptionHandling:
         state = ArdourState()
 
         # Single arg where two expected
-        state._on_strip_gain("/strip/gain", [1])
+        state._on_strip_gain("/strip/gain/1", [])
         # Should not crash, just not update
 
         # Two args for single arg field
@@ -154,7 +154,7 @@ class TestConcurrentStateUpdates:
 
         # Simulate rapid track updates
         for i in range(1, 100):
-            state._on_strip_gain("/strip/gain", [1, float(i) / 10.0])
+            state._on_strip_gain("/strip/gain/1", [float(i) / 10.0])
 
         assert state.get_track(1).gain_db == 9.9
 
@@ -197,13 +197,13 @@ class TestFeedbackHandlerOrdering:
         state2 = ArdourState()
 
         # Apply feedback in different order
-        state1._on_strip_name("/strip/name", [1, "Track"])
-        state1._on_strip_gain("/strip/gain", [1, -6.0])
-        state1._on_strip_mute("/strip/mute", [1, 1])
+        state1._on_strip_name("/strip/name/1", ["Track"])
+        state1._on_strip_gain("/strip/gain/1", [-6.0])
+        state1._on_strip_mute("/strip/mute/1", [1])
 
-        state2._on_strip_mute("/strip/mute", [1, 1])
-        state2._on_strip_gain("/strip/gain", [1, -6.0])
-        state2._on_strip_name("/strip/name", [1, "Track"])
+        state2._on_strip_mute("/strip/mute/1", [1])
+        state2._on_strip_gain("/strip/gain/1", [-6.0])
+        state2._on_strip_name("/strip/name/1", ["Track"])
 
         # Final states should be identical
         track1 = state1.get_track(1)
@@ -229,8 +229,8 @@ class TestComplexFeedbackSequences:
 
         # Load tracks
         for i in range(1, 4):
-            state._on_strip_name("/strip/name", [i, f"Track{i}"])
-            state._on_strip_gain("/strip/gain", [i, 0.0])
+            state._on_strip_name(f"/strip/name/{i}", [f"Track{i}"])
+            state._on_strip_gain(f"/strip/gain/{i}", [0.0])
 
         # Verify complete state
         session = state.get_session_info()
@@ -265,11 +265,11 @@ class TestComplexFeedbackSequences:
         state = ArdourState()
 
         # Create recording track
-        state._on_strip_name("/strip/name", [1, "Recording"])
-        state._on_strip_recenable("/strip/recenable", [1, 0])
+        state._on_strip_name("/strip/name/1", ["Recording"])
+        state._on_strip_recenable("/strip/recenable/1", [0])
 
         # Arm for recording
-        state._on_strip_recenable("/strip/recenable", [1, 1])
+        state._on_strip_recenable("/strip/recenable/1", [1])
         assert state.get_track(1).rec_enabled is True
 
         # Start recording
@@ -296,10 +296,10 @@ class TestStateRecovery:
         state = ArdourState()
 
         # Create track with minimal feedback
-        state._on_strip_name("/strip/name", [1, "Track"])
+        state._on_strip_name("/strip/name/1", ["Track"])
 
         # Add more properties
-        state._on_strip_gain("/strip/gain", [1, -3.0])
+        state._on_strip_gain("/strip/gain/1", [-3.0])
 
         track = state.get_track(1)
         assert track.name == "Track"
@@ -310,8 +310,8 @@ class TestStateRecovery:
         state = ArdourState()
 
         # Feedback arrives out of order
-        state._on_strip_gain("/strip/gain", [1, -6.0])  # Before name
-        state._on_strip_name("/strip/name", [1, "Track"])
+        state._on_strip_gain("/strip/gain/1", [-6.0])  # Before name
+        state._on_strip_name("/strip/name/1", ["Track"])
 
         track = state.get_track(1)
         assert track.name == "Track"

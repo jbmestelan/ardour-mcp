@@ -80,7 +80,7 @@ class ArdourState:
             osc_bridge: ArdourOSCBridge instance to register handlers with
         """
         # Transport feedback
-        osc_bridge.register_feedback_handler("/transport_frame", self._on_transport_frame)
+        osc_bridge.register_feedback_handler("/position/samples", self._on_transport_frame)
         osc_bridge.register_feedback_handler("/transport_speed", self._on_transport_speed)
         osc_bridge.register_feedback_handler("/record_enabled", self._on_record_enabled)
         osc_bridge.register_feedback_handler("/tempo", self._on_tempo)
@@ -92,21 +92,24 @@ class ArdourState:
         osc_bridge.register_feedback_handler("/sample_rate", self._on_sample_rate)
         osc_bridge.register_feedback_handler("/dirty", self._on_dirty)
 
-        # Track feedback (strip messages)
-        osc_bridge.register_feedback_handler("/strip/name", self._on_strip_name)
-        osc_bridge.register_feedback_handler("/strip/gain", self._on_strip_gain)
-        osc_bridge.register_feedback_handler("/strip/pan_stereo_position", self._on_strip_pan)
-        osc_bridge.register_feedback_handler("/strip/mute", self._on_strip_mute)
-        osc_bridge.register_feedback_handler("/strip/solo", self._on_strip_solo)
-        osc_bridge.register_feedback_handler("/strip/recenable", self._on_strip_recenable)
+        # Track feedback (strip messages). Ardour encodes the strip id in the
+        # address path (e.g. /strip/name/1), so match the wildcard form.
+        osc_bridge.register_feedback_handler("/strip/name/*", self._on_strip_name)
+        osc_bridge.register_feedback_handler("/strip/gain/*", self._on_strip_gain)
+        osc_bridge.register_feedback_handler(
+            "/strip/pan_stereo_position/*", self._on_strip_pan)
+        osc_bridge.register_feedback_handler("/strip/mute/*", self._on_strip_mute)
+        osc_bridge.register_feedback_handler("/strip/solo/*", self._on_strip_solo)
+        osc_bridge.register_feedback_handler(
+            "/strip/recenable/*", self._on_strip_recenable)
 
         logger.info("Registered OSC feedback handlers for state updates")
 
     # Feedback handler methods
     def _on_transport_frame(self, address: str, args: List[Any]) -> None:
-        """Handle transport frame updates."""
+        """Handle transport frame updates from /position/samples/<frame>."""
         if args:
-            self.update_transport(frame=args[0])
+            self.update_transport(frame=int(float(args[0])))
 
     def _on_transport_speed(self, address: str, args: List[Any]) -> None:
         """Handle transport speed updates."""
@@ -158,41 +161,63 @@ class ArdourState:
             with self._lock:
                 self._state.dirty = bool(args[0])
 
+    @staticmethod
+    def _strip_id(address: str, parameter: str) -> Optional[int]:
+        """
+        Extract the strip id from Ardour addresses like /strip/<parameter>/<id>.
+
+        Returns None for unrelated or nested addresses such as
+        /strip/<parameter>/automation/<id>.
+        """
+        parts = address.split("/")
+        if (
+            len(parts) == 4
+            and parts[1] == "strip"
+            and parts[2] == parameter
+            and parts[3].isdigit()
+        ):
+            return int(parts[3])
+        return None
+
     def _on_strip_name(self, address: str, args: List[Any]) -> None:
         """Handle track name updates."""
-        if len(args) >= 2:
-            strip_id, name = int(args[0]), str(args[1])
-            self.update_track(strip_id, name=name)
+        strip_id = self._strip_id(address, "name")
+        if strip_id is not None and args:
+            name = str(args[0])
+            # Ardour sends a blank placeholder before the real name; keep the
+            # real name instead of letting the placeholder clobber it.
+            if name.strip():
+                self.update_track(strip_id, name=name)
 
     def _on_strip_gain(self, address: str, args: List[Any]) -> None:
         """Handle track gain updates."""
-        if len(args) >= 2:
-            strip_id, gain = int(args[0]), float(args[1])
-            self.update_track(strip_id, gain_db=gain)
+        strip_id = self._strip_id(address, "gain")
+        if strip_id is not None and args:
+            self.update_track(strip_id, gain_db=float(args[0]))
 
     def _on_strip_pan(self, address: str, args: List[Any]) -> None:
         """Handle track pan updates."""
-        if len(args) >= 2:
-            strip_id, pan = int(args[0]), float(args[1])
-            self.update_track(strip_id, pan=pan)
+        strip_id = self._strip_id(address, "pan_stereo_position")
+        if strip_id is not None and args:
+            self.update_track(strip_id, pan=float(args[0]))
 
     def _on_strip_mute(self, address: str, args: List[Any]) -> None:
         """Handle track mute updates."""
-        if len(args) >= 2:
-            strip_id, muted = int(args[0]), bool(args[1])
-            self.update_track(strip_id, muted=muted)
+        strip_id = self._strip_id(address, "mute")
+        if strip_id is not None and args:
+            self.update_track(strip_id, muted=bool(args[0]))
 
     def _on_strip_solo(self, address: str, args: List[Any]) -> None:
         """Handle track solo updates."""
-        if len(args) >= 2:
-            strip_id, soloed = int(args[0]), bool(args[1])
-            self.update_track(strip_id, soloed=soloed)
+        strip_id = self._strip_id(address, "solo")
+        if strip_id is not None and args:
+            self.update_track(strip_id, soloed=bool(args[0]))
 
     def _on_strip_recenable(self, address: str, args: List[Any]) -> None:
         """Handle track record enable updates."""
-        if len(args) >= 2:
-            strip_id, rec_enabled = int(args[0]), bool(args[1])
-            self.update_track(strip_id, rec_enabled=rec_enabled)
+        strip_id = self._strip_id(address, "recenable")
+        if strip_id is not None and args:
+            self.update_track(strip_id, rec_enabled=bool(args[0]))
 
     def update_transport(
         self,

@@ -202,7 +202,7 @@ class TestFeedbackHandlers:
         calls = mock_bridge.register_feedback_handler.call_args_list
         addresses = [call[0][0] for call in calls]
 
-        assert "/transport_frame" in addresses
+        assert "/position/samples" in addresses
         assert "/transport_speed" in addresses
         assert "/record_enabled" in addresses
         assert "/tempo" in addresses
@@ -211,8 +211,8 @@ class TestFeedbackHandlers:
         assert "/session_name" in addresses
         assert "/sample_rate" in addresses
         assert "/dirty" in addresses
-        assert "/strip/name" in addresses
-        assert "/strip/gain" in addresses
+        assert "/strip/name/*" in addresses
+        assert "/strip/gain/*" in addresses
 
     def test_on_transport_frame(self):
         """Test transport frame feedback handler."""
@@ -329,42 +329,42 @@ class TestFeedbackHandlers:
     def test_on_strip_name(self):
         """Test strip name feedback handler."""
         state = ArdourState()
-        state._on_strip_name("/strip/name", [1, "Vocals"])
+        state._on_strip_name("/strip/name/1", ["Vocals"])
 
         assert state._state.tracks[1].name == "Vocals"
 
     def test_on_strip_gain(self):
         """Test strip gain feedback handler."""
         state = ArdourState()
-        state._on_strip_gain("/strip/gain", [1, -6.0])
+        state._on_strip_gain("/strip/gain/1", [-6.0])
 
         assert state._state.tracks[1].gain_db == -6.0
 
     def test_on_strip_pan(self):
         """Test strip pan feedback handler."""
         state = ArdourState()
-        state._on_strip_pan("/strip/pan_stereo_position", [1, -0.5])
+        state._on_strip_pan("/strip/pan_stereo_position/1", [-0.5])
 
         assert state._state.tracks[1].pan == -0.5
 
     def test_on_strip_mute(self):
         """Test strip mute feedback handler."""
         state = ArdourState()
-        state._on_strip_mute("/strip/mute", [1, 1])
+        state._on_strip_mute("/strip/mute/1", [1])
 
         assert state._state.tracks[1].muted is True
 
     def test_on_strip_solo(self):
         """Test strip solo feedback handler."""
         state = ArdourState()
-        state._on_strip_solo("/strip/solo", [1, 1])
+        state._on_strip_solo("/strip/solo/1", [1])
 
         assert state._state.tracks[1].soloed is True
 
     def test_on_strip_recenable(self):
         """Test strip record enable feedback handler."""
         state = ArdourState()
-        state._on_strip_recenable("/strip/recenable", [1, 1])
+        state._on_strip_recenable("/strip/recenable/1", [1])
 
         assert state._state.tracks[1].rec_enabled is True
 
@@ -605,12 +605,12 @@ class TestComplexScenarios:
         """Test a sequence of track feedback updates."""
         state = ArdourState()
 
-        state._on_strip_name("/strip/name", [1, "Vocals"])
-        state._on_strip_gain("/strip/gain", [1, -6.0])
-        state._on_strip_pan("/strip/pan_stereo_position", [1, -0.3])
-        state._on_strip_mute("/strip/mute", [1, 0])
-        state._on_strip_solo("/strip/solo", [1, 0])
-        state._on_strip_recenable("/strip/recenable", [1, 1])
+        state._on_strip_name("/strip/name/1", ["Vocals"])
+        state._on_strip_gain("/strip/gain/1", [-6.0])
+        state._on_strip_pan("/strip/pan_stereo_position/1", [-0.3])
+        state._on_strip_mute("/strip/mute/1", [0])
+        state._on_strip_solo("/strip/solo/1", [0])
+        state._on_strip_recenable("/strip/recenable/1", [1])
 
         track = state.get_track(1)
         assert track.name == "Vocals"

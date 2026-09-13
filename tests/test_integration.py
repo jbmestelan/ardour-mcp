@@ -38,13 +38,13 @@ class TestOSCBridgeStateIntegration:
         state = ArdourState()
 
         # Update multiple tracks
-        state._on_strip_name("/strip/name", [1, "Vocals"])
-        state._on_strip_gain("/strip/gain", [1, -6.0])
-        state._on_strip_mute("/strip/mute", [1, 0])
+        state._on_strip_name("/strip/name/1", ["Vocals"])
+        state._on_strip_gain("/strip/gain/1", [-6.0])
+        state._on_strip_mute("/strip/mute/1", [0])
 
-        state._on_strip_name("/strip/name", [2, "Guitar"])
-        state._on_strip_gain("/strip/gain", [2, -3.0])
-        state._on_strip_pan("/strip/pan_stereo_position", [2, -0.5])
+        state._on_strip_name("/strip/name/2", ["Guitar"])
+        state._on_strip_gain("/strip/gain/2", [-3.0])
+        state._on_strip_pan("/strip/pan_stereo_position/2", [-0.5])
 
         tracks = state.get_all_tracks()
         assert len(tracks) == 2
@@ -275,9 +275,9 @@ class TestFeedbackHandlerChaining:
         state = ArdourState()
 
         # Create track with feedback
-        state._on_strip_name("/strip/name", [1, "NewTrack"])
-        state._on_strip_gain("/strip/gain", [1, 0.0])
-        state._on_strip_pan("/strip/pan_stereo_position", [1, 0.0])
+        state._on_strip_name("/strip/name/1", ["NewTrack"])
+        state._on_strip_gain("/strip/gain/1", [0.0])
+        state._on_strip_pan("/strip/pan_stereo_position/1", [0.0])
 
         track = state.get_track(1)
         assert track.name == "NewTrack"
@@ -285,8 +285,8 @@ class TestFeedbackHandlerChaining:
         assert track.pan == 0.0
 
         # Modify track
-        state._on_strip_gain("/strip/gain", [1, -6.0])
-        state._on_strip_mute("/strip/mute", [1, 1])
+        state._on_strip_gain("/strip/gain/1", [-6.0])
+        state._on_strip_mute("/strip/mute/1", [1])
 
         track = state.get_track(1)
         assert track.gain_db == -6.0
@@ -356,7 +356,7 @@ class TestErrorRecoveryIntegration:
         state = ArdourState()
 
         # Valid feedback
-        state._on_strip_name("/strip/name", [1, "Test"])
+        state._on_strip_name("/strip/name/1", ["Test"])
         assert state.get_track(1).name == "Test"
 
         # Invalid feedback (empty args)
@@ -374,11 +374,11 @@ class TestErrorRecoveryIntegration:
         state = ArdourState()
 
         # Try feedback with missing arguments
-        state._on_strip_mute("/strip/mute", [1])  # Missing second arg
+        state._on_strip_mute("/strip/mute/1", [])  # Missing second arg
         # Should not crash and create empty track
 
         # Now provide proper feedback
-        state._on_strip_mute("/strip/mute", [1, 1])
+        state._on_strip_mute("/strip/mute/1", [1])
         assert state.get_track(1).muted is True
 
     def test_state_recovery_after_operations(self):
@@ -411,12 +411,12 @@ class TestComplexMultiModuleScenarios:
 
         # Create tracks
         for i in range(1, 4):
-            state._on_strip_name("/strip/name", [i, f"Track{i}"])
-            state._on_strip_gain("/strip/gain", [i, -3.0])
-            state._on_strip_mute("/strip/mute", [i, 0])
+            state._on_strip_name(f"/strip/name/{i}", [f"Track{i}"])
+            state._on_strip_gain(f"/strip/gain/{i}", [-3.0])
+            state._on_strip_mute(f"/strip/mute/{i}", [0])
 
         # Enable recording on first track
-        state._on_strip_recenable("/strip/recenable", [1, 1])
+        state._on_strip_recenable("/strip/recenable/1", [1])
 
         # Start transport
         state._on_transport_speed("/transport_speed", [1.0])
@@ -450,15 +450,15 @@ class TestComplexMultiModuleScenarios:
         ]
 
         for strip_id, name, track_type, gain, pan in tracks_config:
-            state._on_strip_name("/strip/name", [strip_id, name])
-            state._on_strip_gain("/strip/gain", [strip_id, gain])
-            state._on_strip_pan("/strip/pan_stereo_position", [strip_id, pan])
+            state._on_strip_name(f"/strip/name/{strip_id}", [name])
+            state._on_strip_gain(f"/strip/gain/{strip_id}", [gain])
+            state._on_strip_pan(f"/strip/pan_stereo_position/{strip_id}", [pan])
 
         # Mute guide track temporarily
-        state._on_strip_mute("/strip/mute", [1, 1])
+        state._on_strip_mute("/strip/mute/1", [1])
 
         # Solo vocals for recording
-        state._on_strip_solo("/strip/solo", [4, 1])
+        state._on_strip_solo("/strip/solo/4", [1])
 
         # Verify mixing state
         tracks = state.get_all_tracks()

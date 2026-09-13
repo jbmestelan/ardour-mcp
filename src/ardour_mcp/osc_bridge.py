@@ -7,6 +7,8 @@ This module handles bidirectional OSC communication:
 """
 
 import logging
+import queue
+import socket
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
@@ -19,6 +21,55 @@ class OSCConnectionError(Exception):
     """Raised when OSC connection fails."""
 
     pass
+
+
+class _OrderedOSCUDPServer(osc_server.OSCUDPServer):
+    """
+    OSC UDP server that reads datagrams quickly and handles them in order.
+
+    The stock OSCUDPServer dispatches inline, which can overflow the socket
+    receive buffer (dropping packets) during Ardour's large state dump.
+    ThreadingOSCUDPServer avoids drops but handles packets in parallel, so
+    Ardour's placeholder values can overwrite real ones. This server drains the
+    socket into a queue in the read loop and processes the queue sequentially
+    in a worker thread, avoiding both problems.
+    """
+
+    def __init__(self, server_address: Any, dispatcher_obj: Any, *args: Any,
+                 **kwargs: Any) -> None:
+        super().__init__(server_address, dispatcher_obj, *args, **kwargs)
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        except OSError:
+            pass
+        self._queue: "queue.Queue" = queue.Queue()
+        self._worker = threading.Thread(
+            target=self._process_queue, daemon=True, name="OSC-Feedback-Worker"
+        )
+        self._worker.start()
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # Keep the socket read loop fast; handle the datagram in the worker.
+        self._queue.put((request, client_address))
+
+    def _process_queue(self) -> None:
+        while True:
+            request, client_address = self._queue.get()
+            if request is None:
+                self._queue.task_done()
+                break
+            try:
+                self.finish_request(request, client_address)
+            except Exception:
+                self.handle_error(request, client_address)
+            finally:
+                self._queue.task_done()
+
+    def server_close(self) -> None:
+        q = getattr(self, "_queue", None)
+        if q is not None:
+            q.put((None, None))
+        super().server_close()
 
 
 class ArdourOSCBridge:
@@ -97,16 +148,16 @@ class ArdourOSCBridge:
             try:
                 logger.info("Connecting to Ardour...")
 
-                # Create OSC client for sending commands
-                self.client = udp_client.SimpleUDPClient(self.ardour_host, self.ardour_port)
+                # Create OSC client for sending commands. Force IPv4: Ardour
+                # listens on IPv4, and resolving "localhost" to ::1 would make
+                # commands silently go nowhere.
+                self.client = udp_client.SimpleUDPClient(
+                    self.ardour_host, self.ardour_port, family=socket.AF_INET
+                )
                 logger.debug(f"OSC client created: {self.ardour_host}:{self.ardour_port}")
 
                 # Start OSC server for receiving feedback
                 self._start_feedback_server()
-
-                # Test connection by sending /refresh command
-                self.send_command("/refresh")
-                logger.debug("Sent /refresh command to test connection")
 
                 self._connected = True
                 logger.info("Successfully connected to Ardour")
@@ -129,8 +180,10 @@ class ArdourOSCBridge:
             OSError: If server cannot bind to port
         """
         try:
-            # Create server with our dispatcher
-            self.server = osc_server.ThreadingOSCUDPServer(
+            # Create server with our dispatcher. Datagrams are drained quickly
+            # and handled in arrival order so Ardour's placeholder values are
+            # always superseded by the real values that follow them.
+            self.server = _OrderedOSCUDPServer(
                 ("0.0.0.0", self.feedback_port), self.dispatcher
             )
             logger.debug(f"OSC feedback server created on port {self.feedback_port}")
@@ -169,6 +222,9 @@ class ArdourOSCBridge:
             if self.server:
                 try:
                     self.server.shutdown()
+                    # Close the socket (and stop the worker) so the feedback
+                    # port is released for other/replacement instances.
+                    self.server.server_close()
                     logger.debug("Feedback server shutdown complete")
                 except Exception as e:
                     logger.error(f"Error shutting down feedback server: {e}")
@@ -232,9 +288,9 @@ class ArdourOSCBridge:
         self.feedback_handlers[address].append(handler)
 
         # Create wrapper that extracts args from OscMessage
-        def wrapper(unused_addr: str, *args: Any) -> None:
+        def wrapper(actual_address: str, *args: Any) -> None:
             try:
-                handler(address, list(args))
+                handler(actual_address, list(args))
             except Exception as e:
                 logger.error(f"Error in feedback handler for {address}: {e}", exc_info=True)
 

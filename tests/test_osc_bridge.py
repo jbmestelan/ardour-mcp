@@ -181,7 +181,7 @@ class TestOSCBridgeFeedback:
         connected_bridge.register_feedback_handler("/test_feedback", handler)
 
         # Simulate sending feedback to ourselves
-        test_client = udp_client.SimpleUDPClient("localhost", 3821)
+        test_client = udp_client.SimpleUDPClient("127.0.0.1", 3821)
         test_client.send_message("/test_feedback", [42, "test"])
 
         # Wait for message to be received
@@ -208,7 +208,7 @@ class TestOSCBridgeFeedback:
         connected_bridge.register_feedback_handler("/test", handler2)
 
         # Send test message
-        test_client = udp_client.SimpleUDPClient("localhost", 3821)
+        test_client = udp_client.SimpleUDPClient("127.0.0.1", 3821)
         test_client.send_message("/test", [123])
 
         await asyncio.sleep(0.1)
@@ -244,7 +244,7 @@ class TestOSCBridgeFeedback:
         connected_bridge.register_feedback_handler("/test_error", failing_handler)
 
         # Send message that will trigger error
-        test_client = udp_client.SimpleUDPClient("localhost", 3821)
+        test_client = udp_client.SimpleUDPClient("127.0.0.1", 3821)
         test_client.send_message("/test_error", [1, 2, 3])
 
         await asyncio.sleep(0.1)
