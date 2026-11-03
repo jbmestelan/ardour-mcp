@@ -99,24 +99,108 @@ uv sync --all-extras
 1. Launch Ardour and open/create a session
 2. Go to **Edit → Preferences → Control Surfaces**
 3. Enable **"Open Sound Control (OSC)"**
-4. Click **"Show Protocol Settings"**
+4. Click **"Settings"**
 5. Configure:
    - **OSC Server Port**: `3819` (default)
+   - **Feedback / Reply port**: **Manual, `3820`** — the server listens for
+     feedback on this port. Other modes (reply-to-sender or a different
+     manual port) will leave the server deaf to state updates.
    - **Feedback**: Enable **all feedback options**
    - Click **OK**
+
+   If Ardour was already running when you changed the port, toggle the OSC
+   control surface off and on again in the Preferences list so the running
+   surface picks up the new reply port.
 
 ### Configure MCP Client
 
 Choose your client:
 
 <details>
-<summary><b>Claude Code</b> (Recommended - One command!)</summary>
 
-**Using CLI** (easiest):
-```bash
-claude mcp add --transport stdio ardour --scope user \
-  -- uv --directory /absolute/path/to/ardour-mcp run ardour-mcp
+<summary><b>OpenCode v2</b></summary>
+
+**1. Register the MCP server — project-scoped, not global.**
+
+Add to `opencode.jsonc` in the checkout root:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "ardour": {
+        "type": "local",
+        "command": ["uv", "run", "ardour-mcp"],
+        "cwd": "/absolute/path/to/ardour-mcp"
+      }
+    }
+  }
+}
 ```
+
+Notes:
+
+- `cwd` must be an **absolute** path to the checkout; relative paths
+  resolve against the workspace, not the checkout.
+- **Why project-scoped:** the server owns a fixed UDP feedback port
+  (3820), so exactly one instance can run at a time. Registered
+  globally, OpenCode eagerly connects it for *every* session at
+  startup, and the first session to spawn wins the port while every
+  other session's instance dies with `Address already in use`.
+  Project-scoped registration only spawns it for sessions inside this
+  tree. Two concurrent sessions inside the tree can still race — start
+  them one after another.
+
+**2. (Optional) allow hands-off tool use.**
+
+The assistant is most useful when it can run shell commands (probe
+scripts, `uv run pytest`) and edit files without confirming every step.
+In `opencode.jsonc`:
+
+```json
+{
+  "permission": {
+    "edit": "allow",
+    "bash": "allow"
+  }
+}
+```
+
+Use `"ask"` instead of `"allow"` for any category you want to gate.
+See OpenCode's documentation for the full permission schema.
+
+**3. Restart OpenCode so the config takes effect.**
+
+OpenCode spawns MCP servers lazily per session and pins the process for
+the session's lifetime:
+
+- Config changes (`mcp`, `permission`, …) need a restart — `/restart`
+  or a fresh `opencode` start.
+- The tool catalog is snapshotted at spawn: a tool added in new server
+  code only appears after the server process is respawned.
+- If a server process is killed externally, OpenCode does **not**
+  respawn it — restart OpenCode.
+
+**4. Verify.**
+
+Start `opencode` inside the checkout and ask the assistant to call the
+`get_session_info` tool — it should answer with the session name,
+sample rate and transport state. If the `ardour` tools are missing
+from the assistant's tool list, the server did not spawn: re-check the
+JSON syntax (`opencode.jsonc` allows comments), then restart.
+
+**5. Troubleshooting.**
+
+| Symptom | Cause and fix |
+|---------|---------------|
+| Tools answer but levels/position are stale | The reply port isn't Manual `3820` (see step 5 of *Configure Ardour OSC*), or Ardour was restarted — re-arm by restarting OpenCode, or toggle Ardour's OSC surface off/on. |
+| Every tool times out | Ardour isn't running or OSC is disabled on port 3819. |
+
+</details>
+
+<details>
+
+<summary><b>Claude Code</b> (Recommended - One command!)</summary>
 
 **Manual configuration** - Add to `.mcp.json` in your project or `~/.claude.json`:
 ```json

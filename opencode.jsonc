@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Declared here, not in the global config, on purpose: ardour-mcp owns a
+  // fixed UDP feedback port (3820), so exactly one instance may run at a
+  // time. As a global MCP server it is eagerly connected for *every*
+  // OpenCode session at startup; the races meant the first session to spawn
+  // won port 3820 and every other session's instance crashed with
+  // "Address already in use" during a fresh boot. Scoped to this tree, only
+  // sessions under music-making/ spawn it. Two concurrent sessions inside
+  // this tree can still race, so restart those one after the other.
+  "mcp": {
+    "servers": {
+      "ardour": {
+        "type": "local",
+        "command": ["uv", "run", "ardour-mcp"],
+        // Relative cwd paths resolve from the workspace; use an absolute path
+        // so the checkout itself is always the run directory.
+        "cwd": "/absolute/path/to/ardour-mcp"
+      }
+    }
+  }
+}
